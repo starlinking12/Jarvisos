@@ -1,0 +1,14 @@
+{
+  "name": "@jarvis/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Single source of truth for IPC channel and backend event schemas, shared by the Electron shell and mirrored in the Python backend.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3"
+  }
+}

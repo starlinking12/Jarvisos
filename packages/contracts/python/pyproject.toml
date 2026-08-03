@@ -1,0 +1,15 @@
+[project]
+name = "jarvis-contracts"
+version = "0.0.0"
+description = "Python mirror of @jarvis/contracts — event schemas shared with the Electron shell."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jarvis_contracts"]

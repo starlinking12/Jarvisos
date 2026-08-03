@@ -1,0 +1,30 @@
+{
+  "name": "jarvis-os",
+  "private": true,
+  "version": "0.0.0",
+  "description": "JARVIS OS — local-first AI operating environment (Phase 0: foundational architecture)",
+  "packageManager": "pnpm@9.1.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "dev:shell": "turbo run dev --filter=@jarvis/shell",
+    "dev:backend": "turbo run dev --filter=@jarvis/backend",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rimraf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.6",
+    "typescript": "^5.5.3",
+    "rimraf": "^5.0.7",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.2"
+  }
+}

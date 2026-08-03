@@ -1,0 +1,106 @@
+"""ToolExecutor — the Tool Executors tier of the three-tier hierarchy
+(see ADR-0008). This is the only place a tool's handler is actually
+invoked. Domain agents never call `ToolSpec.handler` directly; they call
+`ToolExecutor.execute`, which enforces the SafetyGate check and publishes
+the resulting `agent.observe` event, so every tool invocation in the system
+— regardless of which domain agent triggered it — goes through the same
+authorization and observability path exactly once.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+import structlog
+from jarvis_contracts import AgentObserveEvent, AgentObservePayload, EventSource
+
+from jarvis_backend.event_bus import EventBus
+
+from .safety_gate import PermissionScope, SafetyGate
+from .task_ledger import TaskLedger
+from .tool_registry import ToolRegistry
+from .types import Observation, PlanStep
+
+logger = structlog.get_logger("jarvis_backend.agents.tool_executor")
+
+
+class ToolExecutor:
+    def __init__(
+        self,
+        *,
+        registry: ToolRegistry,
+        safety_gate: SafetyGate,
+        task_ledger: TaskLedger,
+        event_bus: EventBus,
+    ) -> None:
+        self._registry = registry
+        self._safety_gate = safety_gate
+        self._task_ledger = task_ledger
+        self._event_bus = event_bus
+
+    async def execute(self, task_id: uuid.UUID, step: PlanStep) -> Observation:
+        if step.tool is None:
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail="Step has no associated tool for ToolExecutor to run.",
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
+        spec = self._registry.get(step.tool)
+        if spec is None:
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail=f"Unknown tool '{step.tool}'.",
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
+        if spec.permission_scope is not None:
+            check = await self._safety_gate.check(
+                PermissionScope(spec.permission_scope),
+                reason=f"Tool '{spec.name}' requested by step: {step.description}",
+                requested_by=step.agent,
+                task_id=str(task_id),
+            )
+            if not check.granted:
+                observation = Observation(
+                    step_id=step.step_id,
+                    success=False,
+                    detail=f"Permission denied for scope '{spec.permission_scope}'.",
+                )
+                await self._publish_and_record(task_id, observation)
+                return observation
+
+        try:
+            result_text = await spec.handler(step.tool_args)
+            observation = Observation(step_id=step.step_id, success=True, detail=result_text)
+        except Exception as error:  # noqa: BLE001 - a tool failure must become an
+            # Observation the plan can react to, not an unhandled exception
+            # that aborts the whole task.
+            logger.warning("tool_execution_failed", tool=step.tool, error=str(error))
+            observation = Observation(
+                step_id=step.step_id, success=False, detail=f"Tool error: {error}"
+            )
+
+        await self._publish_and_record(task_id, observation)
+        return observation
+
+    async def _publish_and_record(self, task_id: uuid.UUID, observation: Observation) -> None:
+        self._task_ledger.record_observation(task_id, observation)
+        await self._event_bus.publish(
+            AgentObserveEvent(
+                id=uuid.uuid4(),
+                source=EventSource.ORCHESTRATOR,
+                timestamp=datetime.now(UTC),
+                payload=AgentObservePayload(
+                    task_id=task_id,
+                    step_id=observation.step_id,
+                    observation=observation.detail,
+                    success=observation.success,
+                ),
+            )
+        )

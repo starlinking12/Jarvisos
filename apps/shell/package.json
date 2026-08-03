@@ -1,0 +1,29 @@
+{
+  "name": "@jarvis/shell",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JARVIS OS Electron shell — window/overlay/tray management, backend supervision, secure IPC bridge.",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "electron-log": "^5.1.7",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "electron": "^31.2.0",
+    "electron-vite": "^2.3.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.2",
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.10"
+  }
+}
