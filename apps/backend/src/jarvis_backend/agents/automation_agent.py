@@ -5,8 +5,6 @@ from __future__ import annotations
 from jarvis_contracts import EventSource
 
 from .domain_agent import DomainAgent, DomainAgentSpec
-from .tool_executor import ToolExecutor
-from jarvis_backend.ai import ModelRouter
 
 
 class AutomationAgent(DomainAgent):
