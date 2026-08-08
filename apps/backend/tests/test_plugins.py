@@ -88,12 +88,12 @@ def test_duplicate_plugin_ids_are_rejected(tmp_path: Path) -> None:
 
 def test_plugin_directory_expands_user_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    configured = Path("~/.jarvis/plugins")
-    expected = (tmp_path / ".jarvis" / "plugins").resolve()
+    plugin_directory = tmp_path / ".jarvis" / "plugins"
+    _write_manifest(plugin_directory)
 
-    loader = PluginLoader(directories=[configured])
+    loader = PluginLoader(directories=[Path("~/.jarvis/plugins")])
 
-    assert loader._directories == (expected,)
+    assert "example.plugin" in loader.discover()
 
 
 def test_plugin_file_path_fails_closed(tmp_path: Path) -> None:
