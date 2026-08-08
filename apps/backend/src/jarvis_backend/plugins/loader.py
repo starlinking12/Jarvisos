@@ -13,11 +13,16 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from jarvis_backend.agents.tool_registry import ToolRegistry
+
 from .types import PluginManifest, PluginSpec
 
 
 class PluginLoadError(RuntimeError):
     """Raised when a plugin cannot be safely discovered or loaded."""
+
+
+PluginFactory = Callable[[ToolRegistry], Any]
 
 
 class PluginLoader:
@@ -42,14 +47,8 @@ class PluginLoader:
                 discovered[spec.plugin_id] = spec
         return discovered
 
-    def load(self, spec: PluginSpec) -> Callable[..., Any]:
-        """Import an allowlisted plugin entry point.
-
-        Importing third-party code is intentionally gated by plugin id. The
-        returned factory is not invoked here; composition code decides how to
-        provide the registry/context and still routes resulting tools through
-        the normal authorization choke point.
-        """
+    def load(self, spec: PluginSpec) -> PluginFactory:
+        """Import an allowlisted plugin entry point without invoking it."""
         if spec.plugin_id not in self._allowed_ids:
             raise PluginLoadError(f"Plugin '{spec.plugin_id}' is not allowlisted")
 
@@ -64,15 +63,32 @@ class PluginLoader:
             module = importlib.import_module(module_name)
             factory = getattr(module, attribute)
         except (ImportError, AttributeError) as exc:
-            raise PluginLoadError(
-                f"Failed to load plugin '{spec.plugin_id}': {exc}"
-            ) from exc
+            raise PluginLoadError(f"Failed to load plugin '{spec.plugin_id}': {exc}") from exc
 
         if not callable(factory):
             raise PluginLoadError(
                 f"Plugin '{spec.plugin_id}' entry point '{spec.manifest.entry_point}' is not callable"
             )
         return factory
+
+    def load_all(self, registry: ToolRegistry) -> list[str]:
+        """Load and register all discovered allowlisted plugins.
+
+        Plugin factories receive only the normal ToolRegistry. Authorization
+        remains centralized in ToolExecutor/SafetyGate, so a plugin cannot
+        create a privileged execution path merely by being loaded.
+        """
+        loaded: list[str] = []
+        for plugin_id, spec in self.discover().items():
+            if plugin_id not in self._allowed_ids:
+                continue
+            factory = self.load(spec)
+            try:
+                factory(registry)
+            except Exception as exc:  # noqa: BLE001 - isolate faulty plugins.
+                raise PluginLoadError(f"Plugin '{plugin_id}' initialization failed: {exc}") from exc
+            loaded.append(plugin_id)
+        return loaded
 
     @staticmethod
     def _read_manifest(path: Path) -> PluginSpec:
