@@ -1,6 +1,6 @@
 # ADR-0014 — Desktop Intelligence and Safety-Gated Automation
 
-**Status:** Accepted for Phase 5 implementation
+**Status:** Accepted and implemented for Phase 5
 
 ## Context
 
@@ -28,6 +28,8 @@ Phase 5 must not create a second execution path for native input.
    it never invokes native adapters as a bypass around the tool executor.
 7. `AutomationAgent` remains a thin specialization point; automation policy
    belongs to `SafetyGate`, not the agent class.
+8. Native desktop dependencies are exposed through the backend's optional
+   `automation` package extra rather than a separate ad-hoc requirements file.
 
 ## Consequences
 
@@ -37,6 +39,7 @@ Phase 5 must not create a second execution path for native input.
 - Native automation is opt-in and interactive by default.
 - OS-specific implementations can be replaced without changing agents or tools.
 - Unit tests can use fakes without native desktop dependencies.
+- Production/development installs have one canonical dependency declaration.
 
 ### Deferred
 
@@ -44,5 +47,3 @@ Phase 5 must not create a second execution path for native input.
 - OCR and semantic UI targeting are not inferred from window metadata.
 - Complex multi-step transactional automation, rollback, and action planning
   are future extensions.
-- Packaging the native automation dependencies is part of the remaining Phase 5
-  packaging work.
