@@ -1,5 +1,0 @@
-# Temporary Phase 5 development install.
-# These dependencies will move into the backend's optional pyproject extra
-# as part of the Phase 5 packaging/distribution work.
-pyautogui>=0.9.54
-pygetwindow>=0.0.9
