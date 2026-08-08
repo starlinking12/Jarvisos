@@ -59,6 +59,21 @@ class ToolExecutor:
             await self._publish_and_record(task_id, observation)
             return observation
 
+        # Defense-in-depth for callers that reach ToolExecutor without first
+        # passing through DomainAgent's allowlist check. A tool declaring an
+        # owner may only be executed by that exact agent identity.
+        if spec.owner_agent is not None and spec.owner_agent != step.agent:
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail=(
+                    f"Tool '{spec.name}' is restricted to agent "
+                    f"'{spec.owner_agent.value}'."
+                ),
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
         if spec.permission_scope is not None:
             check = await self._safety_gate.check(
                 PermissionScope(spec.permission_scope),
