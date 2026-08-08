@@ -1,4 +1,18 @@
-"""JARVIS backend entrypoint and composition root."""
+"""JARVIS backend entrypoint.
+
+Runs standalone for development (`python -m jarvis_backend.main --port 8137`)
+or as a supervised child process spawned by Electron's `BackendSupervisor`
+(`apps/shell/src/main/backend/BackendSupervisor.ts`), which passes the same
+`--port` flag and watches stdout for uvicorn's "Uvicorn running" line as its
+readiness signal.
+
+This module is the composition root for every backend subsystem — the one
+place that constructs providers/repositories from config and wires them
+into `ModelRouter`, the agent framework, the Voice Engine, the
+Security Center, and Phase 5 desktop adapters. Every other module receives
+these as constructor arguments rather than reaching for globals, keeping
+every subsystem unit-testable in isolation (see `apps/backend/tests/`).
+"""
 
 from __future__ import annotations
 
@@ -21,12 +35,7 @@ from jarvis_backend.agents.domain_agent import DomainAgent, build_default_agent_
 from jarvis_backend.agents.orchestrator import Orchestrator
 from jarvis_backend.agents.permission_broker import PermissionBroker
 from jarvis_backend.agents.planner import SimplePlanner
-from jarvis_backend.agents.safety_gate import (
-    PermissionDecisionKind,
-    PermissionScope,
-    SafetyGate,
-    SafetyPolicy,
-)
+from jarvis_backend.agents.safety_gate import PermissionDecisionKind, PermissionScope, SafetyGate, SafetyPolicy
 from jarvis_backend.agents.task_ledger import TaskLedger
 from jarvis_backend.agents.tool_executor import ToolExecutor
 from jarvis_backend.agents.tool_registry import ToolRegistry
@@ -115,6 +124,10 @@ def configure_logging(level: str) -> None:
 
 
 def build_provider(config: ProviderConfig) -> ModelProvider:
+    """Constructs a concrete provider from its config `kind`. This is the
+    only place that branches on provider kind — everything downstream
+    (ModelRouter, agents, Orchestrator) works purely against the
+    `ModelProvider` protocol, per ADR-0002."""
     if config.kind == "ollama":
         if not config.host:
             raise ValueError(f"Provider '{config.name}' of kind 'ollama' requires a host")
@@ -126,6 +139,12 @@ def build_provider(config: ProviderConfig) -> ModelProvider:
 
 @dataclass(slots=True)
 class OrchestratorBundle:
+    """Everything `build_orchestrator` constructs that later composition
+    steps (`build_voice_engine`, `build_security_center`) need access to.
+    A plain tuple would work but a named bundle keeps the growing set of
+    cross-referenced pieces self-documenting as more phases add their own
+    "needs access to the orchestrator's internals" wiring."""
+
     orchestrator: Orchestrator
     providers: dict[str, ModelProvider]
     tool_registry: ToolRegistry
@@ -136,7 +155,7 @@ class OrchestratorBundle:
 def _build_desktop_adapters(
     settings: Settings,
 ) -> tuple[WindowManager | None, InputController | None]:
-    """Construct optional native desktop adapters without breaking the backend."""
+    """Construct optional native desktop adapters without making them global."""
     try:
         window_manager: WindowManager | None = PyGetWindowManager()
     except DesktopDependencyUnavailable as error:
@@ -154,6 +173,12 @@ def _build_desktop_adapters(
 
 
 def build_orchestrator(settings: Settings, database: Database | None = None) -> OrchestratorBundle:
+    """`database` is optional — when `None` (e.g. most unit tests), every
+    repository-backed durability feature (task/audit persistence, real
+    semantic memory) degrades to its Phase 2/3 in-memory/null behavior
+    exactly, per ADR-0012's compatibility guarantee. `main.py`'s own
+    `lifespan` always passes a connected `Database`.
+    """
     providers = {config.name: build_provider(config) for config in settings.providers()}
 
     model_router = ModelRouter(
@@ -190,6 +215,8 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
     audit_repository = AuditRepository(database) if database is not None else None
     permission_policy = SafetyPolicy.production_default()
     if settings.automation_enabled:
+        # Enabling automation never silently grants native input. The existing
+        # Phase 4 permission broker remains the interactive approval boundary.
         permission_policy.overrides[PermissionScope.AUTOMATION_INPUT] = PermissionDecisionKind.PROMPT
     safety_gate = SafetyGate(
         permission_policy,
@@ -199,6 +226,7 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
 
     task_repository = TaskRepository(database) if database is not None else None
     task_ledger = TaskLedger(repository=task_repository)
+
     tool_executor = ToolExecutor(
         registry=tool_registry,
         safety_gate=safety_gate,
@@ -242,6 +270,7 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
     )
 
     planner = SimplePlanner(model_router, tool_registry)
+
     orchestrator = Orchestrator(
         model_router=model_router,
         planner=planner,
@@ -263,6 +292,14 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
 def build_voice_engine(
     voice_settings: VoiceSettings, bundle: OrchestratorBundle
 ) -> VoiceEngine | None:
+    """Constructs the full voice stack (audio I/O, VAD, wake word, STT,
+    TTS, barge-in) and wires it to the already-built `Orchestrator`,
+    `ToolRegistry`, and `SafetyGate`. Returns `None` (not a raised
+    exception) if voice is disabled in config, or if a required native
+    dependency isn't installed — every such failure is logged clearly
+    with the actionable install instructions each provider's own
+    `*UnavailableError`/`*BinaryNotFoundError` already carries.
+    """
     if not voice_settings.enabled:
         logger.info("voice_engine_disabled_by_config")
         return None
@@ -313,10 +350,13 @@ def build_voice_engine(
             barge_in_controller=barge_in_controller,
             barge_in_enabled=voice_settings.barge_in_enabled,
         )
+
         register_voice_tools(bundle.tool_registry, voice_engine)
         logger.info("voice_engine_constructed")
         return voice_engine
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001 - any construction failure (missing
+        # native dep, missing model file, missing binary) must degrade to "voice
+        # disabled" for this run, not crash the whole backend.
         logger.warning("voice_engine_construction_failed", error=str(error))
         return None
 
@@ -324,12 +364,21 @@ def build_voice_engine(
 def build_security_center(
     security_settings: SecuritySettings, database: Database
 ) -> SecurityCenter | None:
+    """Constructs the Security Center with every monitor that can
+    actually run given `security_settings` and this platform. Returns
+    `None` if disabled in config. Individual monitors that need an
+    unavailable native dependency (`psutil`, via `[security]` extras) are
+    skipped with a logged warning rather than aborting the whole Security
+    Center — the remaining monitors (file integrity, and on Windows:
+    startup/registry/scheduled-task) still run.
+    """
     if not security_settings.enabled:
         logger.info("security_center_disabled_by_config")
         return None
 
     security_repository = SecurityRepository(database)
     monitors = []
+
     try:
         monitors.append(ProcessMonitor(denylist_names=frozenset(security_settings.process_denylist)))
         monitors.append(
@@ -337,7 +386,7 @@ def build_security_center(
                 allowed_listen_ports=frozenset(security_settings.network_allowed_listen_ports)
             )
         )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001 - psutil unavailable; see docstring.
         logger.warning("psutil_backed_monitors_unavailable", error=str(error))
 
     monitors.append(StartupMonitor(known_entries=frozenset(security_settings.startup_known_entries)))
@@ -347,6 +396,7 @@ def build_security_center(
             known_task_names=frozenset(security_settings.scheduled_task_known_names)
         )
     )
+
     if security_settings.watched_file_paths:
         monitors.append(
             FileIntegrityMonitor(
@@ -366,6 +416,7 @@ def build_security_center(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+
     database = Database(Path(settings.db_path) if settings.db_path else DEFAULT_DB_PATH)
     await database.connect()
     app.state.database = database
@@ -399,6 +450,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if security_center is not None:
         await security_center.stop()
+
     if voice_engine is not None:
         await voice_engine.stop()
 
@@ -406,6 +458,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         aclose = getattr(provider, "aclose", None)
         if aclose is not None:
             await aclose()
+
     await database.close()
 
 
@@ -417,6 +470,13 @@ def create_app() -> FastAPI:
         description="Local-first AI backend for JARVIS OS.",
         lifespan=lifespan,
     )
+
+    # Electron's renderer never talks to this server for native/high-impact
+    # actions (see ADR-0001 §Decision) — CORS is scoped to the local
+    # loopback origins used by the Vite dev server and packaged app, purely
+    # as defense in depth, not as the primary trust boundary. The renderer
+    # DOES call `/ai/chat` and `/settings/*` directly (content, not native
+    # actions — see routes_ai.py, routes_settings.py).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -424,7 +484,9 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["*"],
     )
+
     app.include_router(api_router)
+
     return app
 
 
@@ -440,6 +502,7 @@ def main() -> None:
     settings = get_settings()
     port = args.port or settings.backend_port
     configure_logging(settings.log_level)
+
     uvicorn.run(
         "jarvis_backend.main:app",
         host="127.0.0.1",
