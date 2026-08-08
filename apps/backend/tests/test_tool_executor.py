@@ -102,6 +102,35 @@ async def test_execute_allows_gated_tool_when_policy_grants_it() -> None:
     assert observation.detail == "wrote the file"
 
 
+async def test_execute_denies_tool_when_owner_agent_does_not_match() -> None:
+    async def handler(args: dict[str, object]) -> str:
+        return "should not run"
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="automation.click",
+            description="owned by automation",
+            handler=handler,
+            permission_scope="automation.input",
+            owner_agent=EventSource.AGENT_AUTOMATION,
+        )
+    )
+    executor = _make_executor(registry, allow_all=True)
+
+    step = PlanStep(
+        step_id=uuid.uuid4(),
+        description="attempt automation from desktop agent",
+        agent=EventSource.AGENT_DESKTOP,
+        tool="automation.click",
+    )
+
+    observation = await executor.execute(uuid.uuid4(), step)
+
+    assert observation.success is False
+    assert "owned by agent 'agent.automation'" in observation.detail
+
+
 async def test_execute_reports_unknown_tool_as_failed_observation() -> None:
     executor = _make_executor(ToolRegistry())
     step = PlanStep(
