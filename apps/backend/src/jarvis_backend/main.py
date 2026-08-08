@@ -45,6 +45,7 @@ from jarvis_backend.config import ProviderConfig, Settings, get_settings
 from jarvis_backend.desktop import (
     AutomationDependencyUnavailable,
     DesktopDependencyUnavailable,
+    InputController,
     PyAutoGUIInputController,
     PyGetWindowManager,
     WindowManager,
@@ -134,20 +135,15 @@ class OrchestratorBundle:
 
 def _build_desktop_adapters(
     settings: Settings,
-) -> tuple[WindowManager | None, object | None]:
-    """Construct optional native desktop adapters without breaking the backend.
-
-    Desktop observation is useful whenever the OS adapter is available. Input
-    automation is separately controlled by ``automation_enabled`` so merely
-    installing pyautogui never activates high-impact input capabilities.
-    """
+) -> tuple[WindowManager | None, InputController | None]:
+    """Construct optional native desktop adapters without breaking the backend."""
     try:
         window_manager: WindowManager | None = PyGetWindowManager()
     except DesktopDependencyUnavailable as error:
         logger.warning("desktop_window_manager_unavailable", error=str(error))
         return None, None
 
-    input_controller = None
+    input_controller: InputController | None = None
     if settings.automation_enabled:
         try:
             input_controller = PyAutoGUIInputController()
@@ -194,9 +190,6 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
     audit_repository = AuditRepository(database) if database is not None else None
     permission_policy = SafetyPolicy.production_default()
     if settings.automation_enabled:
-        # Automation is opt-in and remains interactive by default. The user
-        # must approve each high-impact automation scope through the existing
-        # Phase 4 permission broker; we never silently change automation to ALLOW.
         permission_policy.overrides[PermissionScope.AUTOMATION_INPUT] = PermissionDecisionKind.PROMPT
     safety_gate = SafetyGate(
         permission_policy,
@@ -206,7 +199,6 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
 
     task_repository = TaskRepository(database) if database is not None else None
     task_ledger = TaskLedger(repository=task_repository)
-
     tool_executor = ToolExecutor(
         registry=tool_registry,
         safety_gate=safety_gate,
