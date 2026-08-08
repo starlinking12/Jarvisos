@@ -31,7 +31,9 @@ class PluginLoader:
     MANIFEST_NAME = "jarvis.plugin.json"
 
     def __init__(self, *, directories: Iterable[Path], allowed_ids: Iterable[str] = ()) -> None:
-        self._directories = tuple(Path(directory) for directory in directories)
+        # Expand user-home paths at the boundary so documented configuration
+        # such as ~/.jarvis/plugins works consistently in every process.
+        self._directories = tuple(Path(directory).expanduser() for directory in directories)
         self._allowed_ids = frozenset(allowed_ids)
 
     def discover(self) -> dict[str, PluginSpec]:
@@ -40,7 +42,13 @@ class PluginLoader:
         for directory in self._directories:
             if not directory.exists():
                 continue
-            for manifest_path in sorted(directory.rglob(self.MANIFEST_NAME)):
+            if not directory.is_dir():
+                raise PluginLoadError(f"Plugin path '{directory}' is not a directory")
+            try:
+                manifest_paths = sorted(directory.rglob(self.MANIFEST_NAME))
+            except OSError as exc:
+                raise PluginLoadError(f"Failed to scan plugin directory '{directory}': {exc}") from exc
+            for manifest_path in manifest_paths:
                 spec = self._read_manifest(manifest_path)
                 if spec.plugin_id in discovered:
                     raise PluginLoadError(f"Duplicate plugin id '{spec.plugin_id}'")
