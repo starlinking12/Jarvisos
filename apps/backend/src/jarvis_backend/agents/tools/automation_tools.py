@@ -2,7 +2,8 @@
 
 Every mutating operation is explicitly marked with ``automation.input`` so
 ToolExecutor/SafetyGate remains the sole authorization choke point. These
-handlers perform no permission checks themselves.
+handlers perform no permission checks themselves, but they validate tool
+arguments before invoking native adapters.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from jarvis_backend.desktop.types import InputController, WindowManager
 from ..tool_registry import ToolRegistry, ToolSpec
 
 _AUTOMATION_SCOPE = "automation.input"
+_MAX_TYPED_TEXT = 10_000
 Handler = Callable[[dict[str, object]], Awaitable[str]]
 
 
@@ -156,7 +158,7 @@ def _move_mouse(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         x = _required_int(args, "x")
         y = _required_int(args, "y")
-        duration = _optional_float(args, "duration_s", default=0.0)
+        duration = _optional_float(args, "duration_s", default=0.0, minimum=0.0)
         input_controller.move(x, y, duration_s=duration)
         return f"Moved mouse to x={x}, y={y}."
 
@@ -167,8 +169,8 @@ def _click(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         x = _required_int(args, "x")
         y = _required_int(args, "y")
-        button = str(args.get("button", "left"))
-        clicks = _optional_int(args, "clicks", default=1)
+        button = _optional_button(args, "button", default="left")
+        clicks = _optional_int(args, "clicks", default=1, minimum=1, maximum=3)
         input_controller.click(x, y, button=button, clicks=clicks)
         return f"Clicked {button} at x={x}, y={y} ({clicks} click(s))."
 
@@ -178,7 +180,9 @@ def _click(input_controller: InputController) -> Handler:
 def _type_text(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         text = _required_string(args, "text")
-        interval = _optional_float(args, "interval_s", default=0.0)
+        if len(text) > _MAX_TYPED_TEXT:
+            raise ValueError(f"'text' exceeds the {_MAX_TYPED_TEXT}-character limit")
+        interval = _optional_float(args, "interval_s", default=0.0, minimum=0.0)
         input_controller.type_text(text, interval_s=interval)
         return f"Typed {len(text)} characters."
 
@@ -235,18 +239,45 @@ def _required_int(args: dict[str, object], name: str) -> int:
     return value
 
 
-def _optional_int(args: dict[str, object], name: str, *, default: int) -> int:
+def _optional_int(
+    args: dict[str, object],
+    name: str,
+    *,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     value = args.get(name, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"'{name}' must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"'{name}' must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"'{name}' must be <= {maximum}")
     return value
 
 
-def _optional_float(args: dict[str, object], name: str, *, default: float) -> float:
+def _optional_float(
+    args: dict[str, object],
+    name: str,
+    *,
+    default: float,
+    minimum: float | None = None,
+) -> float:
     value = args.get(name, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"'{name}' must be a number")
-    return float(value)
+    result = float(value)
+    if minimum is not None and result < minimum:
+        raise ValueError(f"'{name}' must be >= {minimum}")
+    return result
+
+
+def _optional_button(args: dict[str, object], name: str, *, default: str) -> str:
+    value = args.get(name, default)
+    if not isinstance(value, str) or value not in {"left", "middle", "right"}:
+        raise ValueError("'button' must be one of: left, middle, right")
+    return value
 
 
 def _result(action: str, success: bool, title: str) -> str:
