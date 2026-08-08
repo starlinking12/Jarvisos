@@ -33,6 +33,11 @@ voice = [
 security = [
     "psutil>=6.0.0",
 ]
+automation = [
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+    "pywinauto>=0.6.8; platform_system == 'Windows'",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -51,6 +56,7 @@ testpaths = ["tests"]
 markers = [
     "live_ollama: requires a real, reachable Ollama server (skipped by default)",
     "live_voice_hardware: requires real audio hardware/native voice deps (skipped by default)",
+    "live_desktop: requires a real Windows desktop session and automation dependencies (skipped by default)",
 ]
 
 [tool.mypy]
