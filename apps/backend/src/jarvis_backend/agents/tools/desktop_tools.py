@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from jarvis_contracts import EventSource
 
-from jarvis_backend.desktop.types import WindowManager
+from jarvis_backend.desktop.types import WindowInfo, WindowManager
 
 from ..tool_registry import ToolRegistry, ToolSpec
+
+Handler = Callable[[dict[str, object]], Awaitable[str]]
 
 
 def register_desktop_tools(registry: ToolRegistry, window_manager: WindowManager) -> None:
@@ -29,7 +33,7 @@ def register_desktop_tools(registry: ToolRegistry, window_manager: WindowManager
     )
 
 
-def _list_windows(window_manager: WindowManager):
+def _list_windows(window_manager: WindowManager) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         del args
         windows = window_manager.list_windows()
@@ -41,7 +45,7 @@ def _list_windows(window_manager: WindowManager):
     return handler
 
 
-def _active_window(window_manager: WindowManager):
+def _active_window(window_manager: WindowManager) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         del args
         window = window_manager.get_active_window()
@@ -52,11 +56,11 @@ def _active_window(window_manager: WindowManager):
     return handler
 
 
-def _format_window(window) -> str:
+def _format_window(window: WindowInfo) -> str:
     bounds = "unknown bounds"
     if None not in (window.left, window.top, window.width, window.height):
         bounds = f"x={window.left}, y={window.top}, w={window.width}, h={window.height}"
-    state = []
+    state: list[str] = []
     if window.minimized:
         state.append("minimized")
     if window.maximized:
