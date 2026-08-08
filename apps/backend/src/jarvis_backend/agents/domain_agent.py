@@ -7,20 +7,10 @@ assigned to it, either delegate to `ToolExecutor` (when the step names a
 tool) or produce a reasoning-only observation via `ModelRouter` (when the
 step is pure analysis/response drafting with no external action).
 
-**Why one generic class for all eight named agents, not eight bespoke
-classes:** in Phase 2, every domain agent's actual capability is "run a
-tool from its allowed set, or reason about the step" — the same operation
-for all of them. What differs between a Vision agent and a Developer agent
-is WHICH tools they're allowed to use and what system-prompt framing they
-bring to reasoning-only steps, both of which are *data* (`DomainAgentSpec`),
-not *behavior*. Giving each agent its own class today, before any of them
-has agent-specific behavior beyond that, would be eight files implementing
-the same logic — exactly the duplication the project mandate prohibits.
-Vision, Automation, Earth, and Security gain real bespoke behavior in their
-respective phases (5, 4, 5, 3) when they have OS-level or model-specific
-work that a generic reasoning-or-tool-call step genuinely cannot express;
-at that point they graduate to their own `DomainAgent` subclass, and this
-generic class remains for agents that never need more than this.
+Most domain agents remain generic and are differentiated by `DomainAgentSpec`.
+Phase 5 graduates the Desktop Agent to a bespoke subclass because it now has
+real desktop-state behavior; Automation remains data-driven until it needs
+agent-specific behavior beyond the shared tool delegation path.
 """
 
 from __future__ import annotations
@@ -79,38 +69,46 @@ class DomainAgent:
 
 
 def build_default_agent_specs() -> dict[EventSource, DomainAgentSpec]:
-    """The eight named domain agents from the project mandate, with their
-    Phase 2 tool allowlists and reasoning framing. Vision/Automation/
-    Earth/Security intentionally have empty tool allowlists until their
-    respective phases give them real capabilities to gate — an empty
-    allowlist means "reasoning-only for now," not "broken.\""""
+    """The eight named domain agents from the project mandate.
+
+    Phase 5 gives Desktop read-only desktop inspection tools and Automation
+    the mutating desktop-control tools. SecurityGate remains the independent
+    authorization layer for all `automation.input` operations.
+    """
     return {
         EventSource.AGENT_DESKTOP: DomainAgentSpec(
             identity=EventSource.AGENT_DESKTOP,
-            description="Understands and reasons about desktop application state.",
-            allowed_tools=frozenset({"system.list_agents"}),
+            description="Understands desktop applications, windows, and native UI state.",
+            allowed_tools=frozenset({
+                "system.list_agents",
+                "desktop.list_windows",
+                "desktop.active_window",
+                "desktop.inspect_ui",
+            }),
             system_prompt="You are the Desktop agent. You reason about applications, "
-            "windows, and UI state. Respond concisely and factually.",
+            "windows, and native UI state. Use verified desktop observations when available. "
+            "Never claim to have changed the desktop yourself; mutating actions belong to "
+            "the Automation agent.",
         ),
         EventSource.AGENT_VISION: DomainAgentSpec(
             identity=EventSource.AGENT_VISION,
-            description="Interprets screen/image content (Phase 5).",
+            description="Interprets screen/image content (Phase 6).",
             system_prompt="You are the Vision agent, operating in reasoning-only mode "
             "until image analysis tooling lands. Be explicit about this limitation "
             "if the step requires actual image interpretation.",
         ),
         EventSource.AGENT_RESEARCH: DomainAgentSpec(
             identity=EventSource.AGENT_RESEARCH,
-            description="Gathers and synthesizes information (web/local search, Phase 4+).",
+            description="Gathers and synthesizes information (future research tooling).",
             system_prompt="You are the Research agent, operating in reasoning-only mode "
             "until search tooling lands. Be explicit about this limitation if the step "
             "requires live information you don't have.",
         ),
         EventSource.AGENT_SECURITY: DomainAgentSpec(
             identity=EventSource.AGENT_SECURITY,
-            description="Monitors and reasons about system security posture (Phase 3).",
-            system_prompt="You are the Security agent, operating in reasoning-only mode "
-            "until monitoring tooling lands in Phase 3.",
+            description="Monitors and reasons about system security posture (Phase 4).",
+            system_prompt="You are the Security agent. You reason about the security findings "
+            "provided by the Security Center and should not invent telemetry.",
         ),
         EventSource.AGENT_MEMORY: DomainAgentSpec(
             identity=EventSource.AGENT_MEMORY,
@@ -121,16 +119,26 @@ def build_default_agent_specs() -> dict[EventSource, DomainAgentSpec]:
         ),
         EventSource.AGENT_EARTH: DomainAgentSpec(
             identity=EventSource.AGENT_EARTH,
-            description="Geospatial visualization and reasoning (Phase 5, CesiumJS).",
+            description="Geospatial visualization and reasoning (Phase 6+).",
             system_prompt="You are the Earth agent, operating in reasoning-only mode "
-            "until geospatial tooling lands in Phase 5.",
+            "until geospatial tooling lands.",
         ),
         EventSource.AGENT_AUTOMATION: DomainAgentSpec(
             identity=EventSource.AGENT_AUTOMATION,
-            description="Executes desktop automation sequences (Phase 4).",
-            system_prompt="You are the Automation agent, operating in reasoning-only mode "
-            "until automation tooling lands in Phase 4. Never claim to have performed a "
-            "desktop action you cannot actually perform yet.",
+            description="Executes gated desktop automation sequences.",
+            allowed_tools=frozenset({
+                "automation.focus_window",
+                "automation.move_window",
+                "automation.resize_window",
+                "automation.click",
+                "automation.type_text",
+                "automation.press_key",
+                "automation.hotkey",
+                "automation.scroll",
+            }),
+            system_prompt="You are the Automation agent. You execute only concrete desktop "
+            "actions represented by registered automation tools. Never claim an action was "
+            "performed unless the tool returned success.",
         ),
         EventSource.AGENT_DEVELOPER: DomainAgentSpec(
             identity=EventSource.AGENT_DEVELOPER,
