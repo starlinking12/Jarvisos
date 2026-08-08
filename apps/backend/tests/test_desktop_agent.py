@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import uuid
 
+from jarvis_contracts import EventSource
+
 from jarvis_backend.agents.desktop_agent import DesktopAgent
 from jarvis_backend.agents.domain_agent import DomainAgentSpec
+from jarvis_backend.agents.types import PlanStep
 from jarvis_backend.desktop.types import WindowInfo
 
 
@@ -26,12 +29,10 @@ class FakeToolExecutor:
         raise AssertionError("reasoning test must not invoke a tool")
 
 
-def test_desktop_agent_reasoning_includes_active_window() -> None:
-    from jarvis_backend.agents.types import PlanStep
-
+async def test_desktop_agent_reasoning_includes_active_window() -> None:
     agent = DesktopAgent(
         DomainAgentSpec(
-            identity=__import__("jarvis_contracts").EventSource.AGENT_DESKTOP,
+            identity=EventSource.AGENT_DESKTOP,
             description="Desktop",
             system_prompt="Desktop system",
         ),
@@ -42,13 +43,9 @@ def test_desktop_agent_reasoning_includes_active_window() -> None:
     step = PlanStep(
         step_id=uuid.uuid4(),
         description="What application is active?",
-        agent=__import__("jarvis_contracts").EventSource.AGENT_DESKTOP,
-        tool=None,
-        tool_args={},
+        agent=EventSource.AGENT_DESKTOP,
     )
 
-    import asyncio
-
-    observation = asyncio.run(agent.handle_step(uuid.uuid4(), step))
+    observation = await agent.handle_step(uuid.uuid4(), step)
     assert observation.success is True
     assert "Browser" in observation.detail
