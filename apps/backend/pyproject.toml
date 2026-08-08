@@ -33,6 +33,10 @@ voice = [
 security = [
     "psutil>=6.0.0",
 ]
+automation = [
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+]
 
 [build-system]
 requires = ["hatchling"]
