@@ -84,3 +84,23 @@ def test_duplicate_plugin_ids_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(PluginLoadError, match="Duplicate plugin id"):
         PluginLoader(directories=[tmp_path]).discover()
+
+
+def test_plugin_directory_expands_user_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    configured = Path("~/.jarvis/plugins")
+    expected = (tmp_path / ".jarvis" / "plugins").resolve()
+
+    loader = PluginLoader(directories=[configured])
+
+    assert loader._directories == (expected,)
+
+
+def test_plugin_file_path_fails_closed(tmp_path: Path) -> None:
+    manifest_file = tmp_path / "not-a-directory"
+    manifest_file.write_text("", encoding="utf-8")
+
+    loader = PluginLoader(directories=[manifest_file])
+
+    with pytest.raises(PluginLoadError, match="not a directory"):
+        loader.discover()
