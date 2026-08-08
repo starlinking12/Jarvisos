@@ -7,6 +7,8 @@ handlers perform no permission checks themselves.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from jarvis_contracts import EventSource
 
 from jarvis_backend.desktop.types import InputController, WindowManager
@@ -14,6 +16,7 @@ from jarvis_backend.desktop.types import InputController, WindowManager
 from ..tool_registry import ToolRegistry, ToolSpec
 
 _AUTOMATION_SCOPE = "automation.input"
+Handler = Callable[[dict[str, object]], Awaitable[str]]
 
 
 def register_automation_tools(
@@ -64,7 +67,6 @@ def register_automation_tools(
             name="automation.mouse_position",
             description="Read the current mouse cursor position.",
             handler=_mouse_position(input_controller),
-            permission_scope=None,
             owner_agent=EventSource.AGENT_AUTOMATION,
         )
     )
@@ -124,7 +126,7 @@ def register_automation_tools(
     )
 
 
-def _focus_window(window_manager: WindowManager):
+def _focus_window(window_manager: WindowManager) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         title = _required_string(args, "title")
         return _result("focus window", window_manager.focus_window(title), title)
@@ -132,7 +134,7 @@ def _focus_window(window_manager: WindowManager):
     return handler
 
 
-def _window_action(window_manager: WindowManager, method_name: str):
+def _window_action(window_manager: WindowManager, method_name: str) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         title = _required_string(args, "title")
         action = getattr(window_manager, method_name)
@@ -141,7 +143,7 @@ def _window_action(window_manager: WindowManager, method_name: str):
     return handler
 
 
-def _mouse_position(input_controller: InputController):
+def _mouse_position(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         del args
         x, y = input_controller.position()
@@ -150,7 +152,7 @@ def _mouse_position(input_controller: InputController):
     return handler
 
 
-def _move_mouse(input_controller: InputController):
+def _move_mouse(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         x = _required_int(args, "x")
         y = _required_int(args, "y")
@@ -161,7 +163,7 @@ def _move_mouse(input_controller: InputController):
     return handler
 
 
-def _click(input_controller: InputController):
+def _click(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         x = _required_int(args, "x")
         y = _required_int(args, "y")
@@ -173,7 +175,7 @@ def _click(input_controller: InputController):
     return handler
 
 
-def _type_text(input_controller: InputController):
+def _type_text(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         text = _required_string(args, "text")
         interval = _optional_float(args, "interval_s", default=0.0)
@@ -183,7 +185,7 @@ def _type_text(input_controller: InputController):
     return handler
 
 
-def _press_key(input_controller: InputController):
+def _press_key(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         key = _required_string(args, "key")
         input_controller.press(key)
@@ -192,10 +194,14 @@ def _press_key(input_controller: InputController):
     return handler
 
 
-def _hotkey(input_controller: InputController):
+def _hotkey(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         raw_keys = args.get("keys")
-        if not isinstance(raw_keys, list) or not raw_keys or any(not isinstance(k, str) for k in raw_keys):
+        if (
+            not isinstance(raw_keys, list)
+            or not raw_keys
+            or any(not isinstance(key, str) for key in raw_keys)
+        ):
             raise ValueError("'keys' must be a non-empty list of strings")
         keys = [key.strip() for key in raw_keys]
         if any(not key for key in keys):
@@ -206,7 +212,7 @@ def _hotkey(input_controller: InputController):
     return handler
 
 
-def _scroll(input_controller: InputController):
+def _scroll(input_controller: InputController) -> Handler:
     async def handler(args: dict[str, object]) -> str:
         amount = _required_int(args, "amount")
         input_controller.scroll(amount)
