@@ -88,6 +88,7 @@ def test_automation_tools_are_gated() -> None:
         "automation.hotkey",
     ):
         assert registry.get(name).permission_scope == "automation.input"
+        assert registry.get(name).owner_agent is not None
 
     assert registry.get("automation.mouse_position").permission_scope is None
 
@@ -111,13 +112,34 @@ async def test_click_handler_uses_injected_controller() -> None:
 
 
 @pytest.mark.asyncio
-async def test_type_text_rejects_missing_text() -> None:
+async def test_click_handler_rejects_invalid_button_and_click_count() -> None:
     registry = ToolRegistry()
     register_automation_tools(
         registry,
         window_manager=FakeWindowManager(),
         input_controller=FakeInputController(),
     )
+    handler = registry.get("automation.click").handler
+
+    with pytest.raises(ValueError, match="button"):
+        await handler({"x": 10, "y": 20, "button": "invalid"})
+
+    with pytest.raises(ValueError, match="clicks"):
+        await handler({"x": 10, "y": 20, "clicks": 4})
+
+
+@pytest.mark.asyncio
+async def test_type_text_rejects_missing_text_and_oversized_text() -> None:
+    registry = ToolRegistry()
+    register_automation_tools(
+        registry,
+        window_manager=FakeWindowManager(),
+        input_controller=FakeInputController(),
+    )
+    handler = registry.get("automation.type_text").handler
 
     with pytest.raises(ValueError, match="text"):
-        await registry.get("automation.type_text").handler({})
+        await handler({})
+
+    with pytest.raises(ValueError, match="character limit"):
+        await handler({"text": "x" * 10_001})
