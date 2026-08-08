@@ -59,6 +59,22 @@ class ToolExecutor:
             await self._publish_and_record(task_id, observation)
             return observation
 
+        # `owner_agent` existed in ToolSpec before Phase 5 but was not yet
+        # enforced. Keep DomainAgent.allowed_tools as the primary capability
+        # declaration and make the registry metadata a second, centralized
+        # defense at the actual execution choke point.
+        if spec.owner_agent is not None and spec.owner_agent != step.agent:
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail=(
+                    f"Tool '{spec.name}' is owned by agent '{spec.owner_agent.value}' "
+                    f"and cannot be executed by '{step.agent.value}'."
+                ),
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
         if spec.permission_scope is not None:
             check = await self._safety_gate.check(
                 PermissionScope(spec.permission_scope),
