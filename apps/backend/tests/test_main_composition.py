@@ -33,8 +33,8 @@ def test_build_provider_ollama_requires_host() -> None:
 
 def test_build_orchestrator_wires_a_complete_stack() -> None:
     settings = Settings(
-        providers_json='[{"name": "mock", "kind": "mock"}]',
-        routing_json=(
+        JARVIS_PROVIDERS_JSON='[{"name": "mock", "kind": "mock"}]',
+        JARVIS_ROUTING_JSON=(
             '{"rules": ['
             '{"task_type": "chat", "targets": [{"provider": "mock", "model": "mock-small"}]},'
             '{"task_type": "reasoning", "targets": [{"provider": "mock", "model": "mock-small"}]},'
