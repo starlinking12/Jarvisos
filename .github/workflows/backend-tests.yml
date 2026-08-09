@@ -44,5 +44,8 @@ jobs:
       - name: Show pytest collection
         run: python -m pytest --collect-only -q
 
+      - name: Diagnose voice integration tests
+        run: python -m pytest tests/test_voice_engine_integration.py -vv --tb=long --timeout=30
+
       - name: Run backend tests
-        run: python -m pytest -vv --tb=short
+        run: python -m pytest -vv --tb=short --timeout=30
