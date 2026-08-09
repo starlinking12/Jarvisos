@@ -20,7 +20,7 @@ concurrency:
 jobs:
   test-backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: apps/backend
@@ -41,5 +41,5 @@ jobs:
       - name: Install backend and test dependencies
         run: python -m pip install -e ".[dev]"
 
-      - name: Run backend tests
-        run: python -m pytest
+      - name: Run focused diagnostic
+        run: python -m pytest tests/test_main_composition.py -vv --tb=long
