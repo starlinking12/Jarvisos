@@ -180,6 +180,14 @@ class VoiceEngine:
                     # linearly from within the phases above/below, not
                     # re-entered from the top of this loop.
                     await asyncio.sleep(0.05)
+
+                # Every state-machine iteration must yield to the event loop.
+                # A finite test/input source can exhaust while the engine
+                # remains in WAKE_LISTENING; without this checkpoint,
+                # _wake_listen_phase() returns immediately and the loop can
+                # spin without reaching a cancellation point, making stop()
+                # unable to cancel _run_task.
+                await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - any unexpected failure
@@ -288,12 +296,6 @@ class VoiceEngine:
             )
         )
 
-        # Orchestrator.handle_user_message already streams `ai.token`/
-        # `orchestrator.message` deltas over the event bus as the LLM
-        # generates (Phase 2, ADR-0003) — that's the token-level streaming
-        # layer. What Phase 3 owns on top is streaming the AUDIO synthesis
-        # of the complete response, which begins the moment the full text
-        # is available; see PiperProvider's streaming synthesis.
         response_text = await self._orchestrator.handle_user_message(
             self._conversation_id, transcript
         )
@@ -336,10 +338,6 @@ class VoiceEngine:
                     ),
                 )
             )
-            # Per the Phase 3 mandate: "resume listening without
-            # restarting the pipeline" — go straight back to LISTENING to
-            # capture what the user is now saying, not through wake-word
-            # again.
             self._set_state(VoiceState.LISTENING)
             return
 
@@ -377,13 +375,8 @@ class VoiceEngine:
 
         previous_state = self._state
         if previous_state == VoiceState.IDLE:
-            # The engine's main loop was never started, so the speaker's
-            # output stream doesn't exist yet — start() is idempotent, so
-            # this is safe even if called again later by a real start().
             await self._speaker.start()
         await self._speak_phase(text)
-        # _speak_phase always ends in WAKE_LISTENING; restore IDLE if that
-        # was the actual prior state (engine not started via start()).
         if previous_state == VoiceState.IDLE:
             self._set_state(VoiceState.IDLE)
         return True
