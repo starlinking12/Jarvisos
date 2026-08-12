@@ -19,6 +19,7 @@ concurrency:
 
 env:
   PYTHONFAULTHANDLER: "1"
+  PYTHONASYNCIODEBUG: "1"
 
 jobs:
   collect:
@@ -55,12 +56,13 @@ jobs:
           cache-dependency-path: apps/backend/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - name: Run voice lifecycle and integration tests with per-test timeout
+      - name: Diagnose voice test setup/hang
         run: >-
           python -m pytest
           tests/test_voice_engine_lifecycle.py
           tests/test_voice_engine_integration.py
-          -vv --tb=long --timeout=30 --timeout-method=signal --durations=20 -ra
+          -vv -s --setup-show --tb=long --timeout=30
+          --timeout-method=signal --durations=20 -ra
 
   backend-suite:
     name: Full backend pytest
@@ -78,7 +80,8 @@ jobs:
           cache-dependency-path: apps/backend/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - name: Run full backend suite with per-test timeout and diagnostics
+      - name: Run full backend suite with diagnostics
         run: >-
           python -m pytest
-          -vv --tb=short --timeout=30 --timeout-method=signal --durations=25 -ra
+          -vv -s --tb=short --timeout=30 --timeout-method=signal
+          --durations=25 -ra
