@@ -2,8 +2,8 @@
 
 Real audio I/O callbacks (via `sounddevice`/PortAudio) run on a dedicated
 OS thread outside asyncio's event loop, and that callback thread must
-never block — a blocked audio callback means dropped/glitched audio at
-the hardware level, audible to the user. `RingBuffer` is the fixed-size,
+never block — a blocked audio callback means dropped/glitched audio at the
+hardware level, audible to the user. `RingBuffer` is the fixed-size,
 overwrite-oldest-on-overflow buffer the callback thread writes into
 without ever waiting on a lock held by slower consumers; `MicrophoneManager`
 drains it into an asyncio-friendly stream from a separate coroutine.
@@ -55,9 +55,11 @@ class RingBuffer:
             return
 
         with self._lock:
-            if n >= self._capacity:
+            if n > self._capacity:
                 # Larger than the whole buffer — keep only the most recent
-                # `capacity` samples.
+                # `capacity` samples. A write exactly equal to capacity is
+                # not overflow: it replaces the whole buffer without
+                # discarding any sample from this write.
                 self._buffer[:] = samples[-self._capacity :]
                 self._write_pos = 0
                 self._available = self._capacity
