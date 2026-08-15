@@ -1,21 +1,4 @@
-"""Whisper.cpp provider — wraps whisper.cpp's CLI binary via subprocess.
-
-whisper.cpp ships no long-running server/streaming API in its base CLI, so
-"streaming partial transcripts" is achieved the same way several
-production voice assistants wrap batch ASR engines: invoke the binary with
-`--max-len 1` (word-level timestamped output — one word per line, emitted
-to stdout as soon as that word is decoded, not only once the whole
-utterance is processed) and read stdout incrementally via
-`asyncio.subprocess`, yielding a partial `TranscriptSegment` per word as it
-arrives. The final `TranscriptSegment` (`is_final=True`) is yielded once
-the process exits, with the full concatenated text. This gives genuine
-low-latency incremental output — the user sees words appear as whisper.cpp
-decodes them — without depending on a non-existent streaming API.
-
-Language detection: whisper.cpp's `-l auto` flag runs its own detection
-pass; the detected language is parsed from stderr (whisper.cpp logs it
-there) and attached to the final segment.
-"""
+"""Whisper.cpp provider — wraps whisper.cpp's CLI binary via subprocess."""
 
 from __future__ import annotations
 
@@ -35,8 +18,6 @@ from ..types import TranscriptSegment
 
 logger = structlog.get_logger("jarvis_backend.voice.stt.whisper_cpp")
 
-# Matches whisper.cpp's word-level output format:
-# [00:00:00.000 --> 00:00:00.480]   Hello
 _TIMESTAMP_LINE = re.compile(
     r"\[(?P<start>\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2}\.\d{3})\]\s*(?P<text>.*)"
 )
@@ -58,7 +39,7 @@ def _parse_timestamp(value: str) -> float:
 
 
 class WhisperCppProvider:
-    """Implements `SttProvider` (`stt/provider.py`) structurally."""
+    """Implements `SttProvider` structurally."""
 
     def __init__(
         self,
@@ -92,8 +73,8 @@ class WhisperCppProvider:
                 "-l",
                 self._language,
                 "-ml",
-                "1",  # word-level output — one word per line, per module docstring
-                "-nt",  # suppress the default non-timestamped summary line
+                "1",
+                "-nt",
                 *self._extra_args,
             ]
 
@@ -102,63 +83,77 @@ class WhisperCppProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            assert process.stdout is not None and process.stderr is not None
 
-            words: list[str] = []
-            last_end_s = segment.start_s
-            detected_language: str | None = None
+            stderr_task = asyncio.create_task(process.stderr.read(), name="whisper-stderr")
+            try:
+                words: list[str] = []
+                last_end_s = segment.start_s
+                detected_language: str | None = None
 
-            assert process.stdout is not None
-            async for raw_line in process.stdout:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                match = _TIMESTAMP_LINE.match(line)
-                if not match:
-                    continue
+                async for raw_line in process.stdout:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    match = _TIMESTAMP_LINE.match(line)
+                    if not match:
+                        continue
 
-                word = match.group("text").strip()
-                if not word:
-                    continue
+                    word = match.group("text").strip()
+                    if not word:
+                        continue
 
-                start_s = segment.start_s + _parse_timestamp(match.group("start"))
-                end_s = segment.start_s + _parse_timestamp(match.group("end"))
-                last_end_s = end_s
-                words.append(word)
+                    start_s = segment.start_s + _parse_timestamp(match.group("start"))
+                    end_s = segment.start_s + _parse_timestamp(match.group("end"))
+                    last_end_s = end_s
+                    words.append(word)
+
+                    yield TranscriptSegment(
+                        text=" ".join(words),
+                        is_final=False,
+                        confidence=None,
+                        start_s=start_s,
+                        end_s=end_s,
+                    )
+
+                stderr_bytes = await stderr_task
+                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+                language_match = _DETECTED_LANGUAGE.search(stderr_text)
+                if language_match:
+                    detected_language = language_match.group(1)
+
+                return_code = await process.wait()
+                if return_code != 0:
+                    logger.warning(
+                        "whisper_cpp_nonzero_exit",
+                        return_code=return_code,
+                        stderr=stderr_text[:500],
+                    )
 
                 yield TranscriptSegment(
                     text=" ".join(words),
-                    is_final=False,
-                    confidence=None,  # whisper.cpp's CLI text output carries no
-                    # per-word confidence; a future provider using whisper.cpp's
-                    # C API directly could surface token log-probabilities here.
-                    start_s=start_s,
-                    end_s=end_s,
+                    is_final=True,
+                    confidence=None,
+                    start_s=segment.start_s,
+                    end_s=last_end_s,
+                    language_code=detected_language,
                 )
+            finally:
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=1.0)
+                    except TimeoutError:
+                        process.kill()
+                        await process.wait()
 
-            stderr_bytes = await process.stderr.read() if process.stderr else b""
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-            language_match = _DETECTED_LANGUAGE.search(stderr_text)
-            if language_match:
-                detected_language = language_match.group(1)
-
-            return_code = await process.wait()
-            if return_code != 0:
-                logger.warning(
-                    "whisper_cpp_nonzero_exit", return_code=return_code, stderr=stderr_text[:500]
-                )
-
-            yield TranscriptSegment(
-                text=" ".join(words),
-                is_final=True,
-                confidence=None,
-                start_s=segment.start_s,
-                end_s=last_end_s,
-                language_code=detected_language,
-            )
+                if not stderr_task.done():
+                    stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
 
     @staticmethod
     def _write_wav(path: Path, segment: SpeechSegment) -> None:
         pcm16 = (np.clip(segment.samples, -1.0, 1.0) * 32767).astype(np.int16)
         with wave.open(str(path), "wb") as wav_file:
             wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setsampwidth(2)
             wav_file.setframerate(segment.config.sample_rate)
             wav_file.writeframes(pcm16.tobytes())
