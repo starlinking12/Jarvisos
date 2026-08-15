@@ -10,7 +10,7 @@ from typing import Protocol
 import structlog
 from jarvis_contracts import EventSource, TaskStatus
 
-from .types import AgentTask, Observation, Plan
+from .types import AgentTask, Observation, Plan, PlanStep
 
 audit_logger = structlog.get_logger("jarvis_backend.audit")
 
@@ -58,6 +58,25 @@ class TaskLedger:
             step_count=len(plan.steps),
         )
         self._persist(self._repository.update_task(task) if self._repository else None)
+
+    def is_planned_step_authorized(self, task_id: uuid.UUID, step: PlanStep) -> bool:
+        """Verify a step matches the task plan when planning has completed."""
+        task = self._require(task_id)
+        if task.plan is None:
+            return True
+
+        planned = next(
+            (candidate for candidate in task.plan.steps if candidate.step_id == step.step_id),
+            None,
+        )
+        if planned is None:
+            return False
+        return (
+            planned.agent == step.agent
+            and planned.tool == step.tool
+            and planned.tool_args == step.tool_args
+            and planned.description == step.description
+        )
 
     def set_status(self, task_id: uuid.UUID, status: TaskStatus) -> None:
         task = self._require(task_id)
