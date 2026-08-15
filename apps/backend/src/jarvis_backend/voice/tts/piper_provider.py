@@ -1,22 +1,4 @@
-"""Piper provider — wraps the `piper` CLI binary via subprocess, streaming
-raw PCM audio to stdout as it's synthesized (`piper --output-raw`), so
-`VoiceEngine` can begin playback before the full utterance finishes
-synthesizing — the same "don't buffer the whole thing first" principle as
-`WhisperCppProvider`'s streaming reads, applied to output instead of input.
-
-**Emotion/speaking-style abstraction:** Piper is a single-speaker (or
-multi-speaker, but not emotion-controllable) neural TTS engine — it has no
-emotion or speaking-style parameter. `VoiceProfile.speaking_style` is
-accepted here (satisfying the `TtsProvider` protocol) but has no effect on
-Piper's output beyond `speaking_rate`, which Piper *does* support natively
-via `--length-scale` (a real, functioning knob — faster/slower speech, not
-a no-op). This is the documented, correct behavior for Piper specifically,
-not a gap: a future emotion-capable neural TTS provider (Phase 5+) reads
-`speaking_style`/`pitch_semitones` for real, and every caller —
-`VoiceEngine`, domain agents constructing a `VoiceProfile` — needs zero
-changes when that provider replaces or joins Piper in `voice/config.py`'s
-routing.
-"""
+"""Piper provider — wraps the `piper` CLI binary via subprocess, streaming raw PCM audio to stdout as it's synthesized."""
 
 from __future__ import annotations
 
@@ -34,10 +16,8 @@ from ..types import AudioConfig, AudioFrame, VoiceProfile
 
 logger = structlog.get_logger("jarvis_backend.voice.tts.piper")
 
-PIPER_OUTPUT_SAMPLE_RATE = 22_050  # Piper's standard model output rate;
-# resampled to the pipeline's AudioConfig at the SpeakerManager boundary if
-# they differ.
-BYTES_PER_SAMPLE = 2  # Piper emits 16-bit PCM
+PIPER_OUTPUT_SAMPLE_RATE = 22_050
+BYTES_PER_SAMPLE = 2
 
 
 class PiperBinaryNotFoundError(RuntimeError):
@@ -52,18 +32,14 @@ class PiperBinaryNotFoundError(RuntimeError):
 
 @dataclass(slots=True, frozen=True)
 class PiperVoiceMapping:
-    """Maps a `VoiceProfile.voice_id` to the on-disk Piper model files that
-    voice actually uses. One `.onnx` model file per voice, per Piper's
-    packaging convention."""
-
     voice_id: str
     display_name: str
     language_code: str
-    model_path: str  # e.g. "voices/en_US-lessac-medium.onnx"
+    model_path: str
 
 
 class PiperProvider:
-    """Implements `TtsProvider` (`tts/provider.py`) structurally."""
+    """Implements `TtsProvider` structurally."""
 
     def __init__(
         self,
@@ -101,8 +77,7 @@ class PiperProvider:
                 f"{list(self._voices.keys())}"
             )
 
-        length_scale = 1.0 / max(voice.speaking_rate, 0.1)  # Piper: smaller = faster
-
+        length_scale = 1.0 / max(voice.speaking_rate, 0.1)
         args = [
             self._binary_path,
             "--model",
@@ -120,36 +95,51 @@ class PiperProvider:
             stderr=asyncio.subprocess.PIPE,
         )
         assert process.stdin is not None and process.stdout is not None
+        assert process.stderr is not None
 
-        process.stdin.write(text.encode("utf-8") + b"\n")
-        await process.stdin.drain()
-        process.stdin.close()
+        stderr_task = asyncio.create_task(process.stderr.read(), name="piper-stderr")
+        try:
+            process.stdin.write(text.encode("utf-8") + b"\n")
+            await process.stdin.drain()
+            process.stdin.close()
 
-        frame_bytes = self._output_config.frame_samples * BYTES_PER_SAMPLE
-        first_frame_yielded = False
+            frame_bytes = self._output_config.frame_samples * BYTES_PER_SAMPLE
+            first_frame_yielded = False
 
-        while True:
-            chunk = await process.stdout.read(frame_bytes)
-            if not chunk:
-                break
+            while True:
+                chunk = await process.stdout.read(frame_bytes)
+                if not chunk:
+                    break
 
-            samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-            if not first_frame_yielded:
-                logger.debug(
-                    "piper_first_audio_chunk",
-                    latency_ms=(time.monotonic() - started_at) * 1000,
+                samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                if not first_frame_yielded:
+                    logger.debug(
+                        "piper_first_audio_chunk",
+                        latency_ms=(time.monotonic() - started_at) * 1000,
+                    )
+                    first_frame_yielded = True
+
+                yield AudioFrame(
+                    samples=samples, config=self._output_config, timestamp_s=time.monotonic()
                 )
-                first_frame_yielded = True
 
-            yield AudioFrame(
-                samples=samples, config=self._output_config, timestamp_s=time.monotonic()
-            )
+            return_code = await process.wait()
+            stderr = await stderr_task
+            if return_code != 0:
+                logger.warning(
+                    "piper_nonzero_exit",
+                    return_code=return_code,
+                    stderr=stderr.decode("utf-8", errors="replace")[:500],
+                )
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
 
-        return_code = await process.wait()
-        if return_code != 0:
-            stderr = await process.stderr.read() if process.stderr else b""
-            logger.warning(
-                "piper_nonzero_exit",
-                return_code=return_code,
-                stderr=stderr.decode("utf-8", errors="replace")[:500],
-            )
+            if not stderr_task.done():
+                stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
