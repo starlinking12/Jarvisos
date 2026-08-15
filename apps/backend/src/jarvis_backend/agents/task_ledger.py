@@ -1,27 +1,4 @@
-"""TaskLedger — the authoritative record of every agent task's lifecycle.
-
-Every mutation (creation, plan assignment, observation, completion) is
-audit-logged via structlog with the task id bound as `correlation_id`, so
-the full lifecycle of any task can be reconstructed from logs alone.
-
-**Phase 4 update:** storage is now durable when a `TaskRepository`-shaped
-object is provided (writes through to SQLite on every mutation — see
-`persistence/repositories/task_repository.py`), fulfilling the promise
-made in ADR-0004/ADR-0007 that Phase 4's persistence layer would change
-`TaskLedger`'s internals without touching its public interface. An
-in-process dict remains as a read-through cache (avoids a DB round trip
-for every `get_task`/`list_tasks` call within one backend session); the
-repository is the durable source of truth surviving restarts.
-
-The repository dependency is expressed as `TaskRepositoryProtocol`
-(structural typing, the same `Protocol`-based pattern as `ModelProvider`/
-`VadProvider`/every other provider in this codebase), not a direct import
-of the concrete `TaskRepository` class — this keeps `agents/` free of a
-hard dependency on `persistence/`, consistent with ADR-0012's dependency
-direction (persistence depends on agents' types, not the reverse).
-Passing no repository (the default) restores Phase 2/3's in-memory-only
-behavior exactly, so no existing test needed to change.
-"""
+"""TaskLedger — authoritative record of every agent task's lifecycle."""
 
 from __future__ import annotations
 
@@ -33,7 +10,7 @@ from typing import Protocol
 import structlog
 from jarvis_contracts import EventSource, TaskStatus
 
-from .types import AgentTask, Observation, Plan
+from .types import AgentTask, Observation, Plan, PlanStep
 
 audit_logger = structlog.get_logger("jarvis_backend.audit")
 
@@ -52,6 +29,7 @@ class TaskLedger:
     def __init__(self, repository: TaskRepositoryProtocol | None = None) -> None:
         self._tasks: dict[uuid.UUID, AgentTask] = {}
         self._repository = repository
+        self._pending_writes: set[asyncio.Task[None]] = set()
 
     def create_task(self, *, goal: str, requested_by: EventSource) -> AgentTask:
         task = AgentTask(
@@ -80,6 +58,25 @@ class TaskLedger:
             step_count=len(plan.steps),
         )
         self._persist(self._repository.update_task(task) if self._repository else None)
+
+    def is_planned_step_authorized(self, task_id: uuid.UUID, step: PlanStep) -> bool:
+        """Verify a step matches the task plan when planning has completed."""
+        task = self._require(task_id)
+        if task.plan is None:
+            return True
+
+        planned = next(
+            (candidate for candidate in task.plan.steps if candidate.step_id == step.step_id),
+            None,
+        )
+        if planned is None:
+            return False
+        return (
+            planned.agent == step.agent
+            and planned.tool == step.tool
+            and planned.tool_args == step.tool_args
+            and planned.description == step.description
+        )
 
     def set_status(self, task_id: uuid.UUID, status: TaskStatus) -> None:
         task = self._require(task_id)
@@ -121,6 +118,11 @@ class TaskLedger:
     def list_tasks(self) -> list[AgentTask]:
         return list(self._tasks.values())
 
+    async def flush_persistence(self) -> None:
+        """Drain outstanding write-through tasks before database shutdown."""
+        while self._pending_writes:
+            await asyncio.gather(*tuple(self._pending_writes), return_exceptions=True)
+
     def _require(self, task_id: uuid.UUID) -> AgentTask:
         task = self._tasks.get(task_id)
         if task is None:
@@ -128,29 +130,21 @@ class TaskLedger:
         return task
 
     def _persist(self, write_coro: object) -> None:
-        """Fires a persistence write-through without making every
-        `TaskLedger` method async — `Orchestrator`'s call sites are
-        already inside `async def` methods on the event loop, so
-        scheduling via `asyncio.ensure_future` runs the write concurrently
-        with whatever the caller does next rather than serializing every
-        mutation behind a DB round trip. A failed write is logged, not
-        raised — durability is a best-effort enhancement layered on top
-        of the always-correct in-memory ledger, not a new failure mode
-        for agent execution to handle. No-ops entirely when no repository
-        was configured (`write_coro` is `None`).
-        """
+        """Schedule persistence and retain a strong reference until completion."""
         if write_coro is None:
             return
 
         async def _run() -> None:
             try:
-                await write_coro  # type: ignore[misc] - Awaitable[None] narrowed
-                # at the two call-site branches above; Protocol methods don't
-                # give us a cleaner static type for "the coroutine this
-                # specific call produced" without one overload per method.
-            except Exception:  # noqa: BLE001 - persistence failures must never
-                # crash agent execution; they're logged and the in-memory
-                # ledger (already updated by the caller) remains correct.
+                await write_coro  # type: ignore[misc]
+            except Exception:  # noqa: BLE001 - durability must not abort execution
                 audit_logger.warning("task_persistence_write_failed", exc_info=True)
 
-        asyncio.ensure_future(_run())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+
+        task = loop.create_task(_run(), name="task-ledger-persistence")
+        self._pending_writes.add(task)
+        task.add_done_callback(self._pending_writes.discard)

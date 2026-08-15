@@ -8,10 +8,10 @@ readiness signal.
 
 This module is the composition root for every backend subsystem — the one
 place that constructs providers/repositories from config and wires them
-into `ModelRouter`, the agent framework, the Voice Engine, and the
-Security Center. Every other module receives these as constructor
-arguments rather than reaching for globals, keeping every subsystem
-unit-testable in isolation (see `apps/backend/tests/`).
+into `ModelRouter`, the agent framework, the Voice Engine, the
+Security Center, and Phase 5 desktop adapters. Every other module receives
+these as constructor arguments rather than reaching for globals, keeping
+every subsystem unit-testable in isolation (see `apps/backend/tests/`).
 """
 
 from __future__ import annotations
@@ -29,14 +29,18 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from jarvis_backend.agents.automation_agent import AutomationAgent
+from jarvis_backend.agents.desktop_agent import DesktopAgent
 from jarvis_backend.agents.domain_agent import DomainAgent, build_default_agent_specs
 from jarvis_backend.agents.orchestrator import Orchestrator
 from jarvis_backend.agents.permission_broker import PermissionBroker
 from jarvis_backend.agents.planner import SimplePlanner
-from jarvis_backend.agents.safety_gate import SafetyGate, SafetyPolicy
+from jarvis_backend.agents.safety_gate import PermissionDecisionKind, PermissionScope, SafetyGate, SafetyPolicy
 from jarvis_backend.agents.task_ledger import TaskLedger
 from jarvis_backend.agents.tool_executor import ToolExecutor
 from jarvis_backend.agents.tool_registry import ToolRegistry
+from jarvis_backend.agents.tools.automation_tools import register_automation_tools
+from jarvis_backend.agents.tools.desktop_tools import register_desktop_tools
 from jarvis_backend.agents.tools.system_tools import register_system_tools
 from jarvis_backend.ai import (
     MockProvider,
@@ -47,6 +51,14 @@ from jarvis_backend.ai import (
 )
 from jarvis_backend.api import api_router
 from jarvis_backend.config import ProviderConfig, Settings, get_settings
+from jarvis_backend.desktop import (
+    AutomationDependencyUnavailable,
+    DesktopDependencyUnavailable,
+    InputController,
+    PyAutoGUIInputController,
+    PyGetWindowManager,
+    WindowManager,
+)
 from jarvis_backend.event_bus import event_bus
 from jarvis_backend.memory import (
     NullLongTermMemory,
@@ -140,6 +152,26 @@ class OrchestratorBundle:
     permission_broker: PermissionBroker
 
 
+def _build_desktop_adapters(
+    settings: Settings,
+) -> tuple[WindowManager | None, InputController | None]:
+    """Construct optional native desktop adapters without making them global."""
+    try:
+        window_manager: WindowManager | None = PyGetWindowManager()
+    except DesktopDependencyUnavailable as error:
+        logger.warning("desktop_window_manager_unavailable", error=str(error))
+        return None, None
+
+    input_controller: InputController | None = None
+    if settings.automation_enabled:
+        try:
+            input_controller = PyAutoGUIInputController()
+        except AutomationDependencyUnavailable as error:
+            logger.warning("desktop_input_controller_unavailable", error=str(error))
+
+    return window_manager, input_controller
+
+
 def build_orchestrator(settings: Settings, database: Database | None = None) -> OrchestratorBundle:
     """`database` is optional — when `None` (e.g. most unit tests), every
     repository-backed durability feature (task/audit persistence, real
@@ -164,10 +196,30 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
         tool_registry, agent_names=[spec.identity.value for spec in agent_specs.values()]
     )
 
+    window_manager, input_controller = _build_desktop_adapters(settings)
+    if window_manager is not None:
+        register_desktop_tools(tool_registry, window_manager)
+        logger.info("desktop_observation_tools_registered")
+
+    if settings.automation_enabled and window_manager is not None and input_controller is not None:
+        register_automation_tools(
+            tool_registry,
+            window_manager=window_manager,
+            input_controller=input_controller,
+        )
+        logger.info("desktop_automation_tools_registered")
+    elif settings.automation_enabled:
+        logger.warning("desktop_automation_not_available")
+
     permission_broker = PermissionBroker(event_bus)
     audit_repository = AuditRepository(database) if database is not None else None
+    permission_policy = SafetyPolicy.production_default()
+    if settings.automation_enabled:
+        # Enabling automation never silently grants native input. The existing
+        # Phase 4 permission broker remains the interactive approval boundary.
+        permission_policy.overrides[PermissionScope.AUTOMATION_INPUT] = PermissionDecisionKind.PROMPT
     safety_gate = SafetyGate(
-        SafetyPolicy.production_default(),
+        permission_policy,
         broker=permission_broker,
         audit_repository=audit_repository,
     )
@@ -182,10 +234,27 @@ def build_orchestrator(settings: Settings, database: Database | None = None) -> 
         event_bus=event_bus,
     )
 
-    agents: dict[EventSource, DomainAgent] = {
-        identity: DomainAgent(spec, model_router=model_router, tool_executor=tool_executor)
-        for identity, spec in agent_specs.items()
-    }
+    agents: dict[EventSource, DomainAgent] = {}
+    for identity, spec in agent_specs.items():
+        if identity == EventSource.AGENT_DESKTOP and window_manager is not None:
+            agents[identity] = DesktopAgent(
+                spec,
+                model_router=model_router,
+                tool_executor=tool_executor,
+                window_manager=window_manager,
+            )
+        elif identity == EventSource.AGENT_AUTOMATION:
+            agents[identity] = AutomationAgent(
+                spec,
+                model_router=model_router,
+                tool_executor=tool_executor,
+            )
+        else:
+            agents[identity] = DomainAgent(
+                spec,
+                model_router=model_router,
+                tool_executor=tool_executor,
+            )
 
     working_memory = WorkingMemory()
     if database is not None:

@@ -1,11 +1,4 @@
-"""ToolExecutor — the Tool Executors tier of the three-tier hierarchy
-(see ADR-0008). This is the only place a tool's handler is actually
-invoked. Domain agents never call `ToolSpec.handler` directly; they call
-`ToolExecutor.execute`, which enforces the SafetyGate check and publishes
-the resulting `agent.observe` event, so every tool invocation in the system
-— regardless of which domain agent triggered it — goes through the same
-authorization and observability path exactly once.
-"""
+"""ToolExecutor — the single tool execution and authorization choke point."""
 
 from __future__ import annotations
 
@@ -59,9 +52,51 @@ class ToolExecutor:
             await self._publish_and_record(task_id, observation)
             return observation
 
+        # Bind execution to the task's planned step once planning exists. This
+        # prevents a caller from reusing a valid task id while swapping in a
+        # different agent, tool, arguments, or step description.
+        if not self._task_ledger.is_planned_step_authorized(task_id, step):
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail="Tool execution denied: step does not match the task plan.",
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
+        # Defense-in-depth for callers that reach ToolExecutor without first
+        # passing through DomainAgent's allowlist check. A tool declaring an
+        # owner may only be executed by that exact agent identity.
+        if spec.owner_agent is not None and spec.owner_agent != step.agent:
+            observation = Observation(
+                step_id=step.step_id,
+                success=False,
+                detail=(
+                    f"Tool '{spec.name}' is restricted to agent "
+                    f"'{spec.owner_agent.value}'."
+                ),
+            )
+            await self._publish_and_record(task_id, observation)
+            return observation
+
         if spec.permission_scope is not None:
+            try:
+                scope = PermissionScope(spec.permission_scope)
+            except ValueError:
+                logger.error("invalid_tool_permission_scope", tool=spec.name)
+                observation = Observation(
+                    step_id=step.step_id,
+                    success=False,
+                    detail=(
+                        f"Permission denied: tool '{spec.name}' declares an invalid "
+                        f"permission scope."
+                    ),
+                )
+                await self._publish_and_record(task_id, observation)
+                return observation
+
             check = await self._safety_gate.check(
-                PermissionScope(spec.permission_scope),
+                scope,
                 reason=f"Tool '{spec.name}' requested by step: {step.description}",
                 requested_by=step.agent,
                 task_id=str(task_id),
@@ -78,9 +113,7 @@ class ToolExecutor:
         try:
             result_text = await spec.handler(step.tool_args)
             observation = Observation(step_id=step.step_id, success=True, detail=result_text)
-        except Exception as error:  # noqa: BLE001 - a tool failure must become an
-            # Observation the plan can react to, not an unhandled exception
-            # that aborts the whole task.
+        except Exception as error:  # noqa: BLE001 - tool failures become observations
             logger.warning("tool_execution_failed", tool=step.tool, error=str(error))
             observation = Observation(
                 step_id=step.step_id, success=False, detail=f"Tool error: {error}"

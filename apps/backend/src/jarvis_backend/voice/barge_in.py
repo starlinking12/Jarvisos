@@ -1,30 +1,4 @@
-"""Barge-in controller (see ADR-0011 for the full latency budget analysis).
-
-While `VoiceEngine` is in the `SPEAKING` state, `BargeInController` runs a
-concurrent VAD check against live microphone frames — the microphone
-pipeline is never stopped or restarted between states (per the Phase 3
-mandate: "Resume listening without restarting the pipeline"), it simply
-isn't being *listened to* for barge-in purposes outside `SPEAKING` state.
-The moment VAD reports speech, `BargeInController` calls
-`SpeakerManager.stop()` directly — bypassing any queue, event, or async
-handoff that would add latency — and reports the measured interrupt
-latency for observability.
-
-**Latency budget (target: under 150ms end-to-end):**
-  - VAD frame duration: 20ms (one `AudioConfig` frame) — worst case, speech
-    starts 1ms into a frame and isn't detected until that frame completes.
-  - VAD hangover: `WebRtcVadProvider`'s hangover smoothing is NOT applied
-    here — barge-in uses a separate, hangover-free VAD check (raw
-    per-frame speech/non-speech) so detection isn't delayed by the same
-    "avoid fragmenting an utterance" smoothing that's correct for STT
-    segmentation but actively harmful for barge-in's latency requirement.
-  - `SpeakerManager.stop()`: bounded by one output callback period (the
-    `blocksize` configured on the `OutputStream`, typically 10-20ms at
-    16kHz) — see `speaker.py`'s docstring.
-  - Total worst case: ~20ms (frame) + ~1ms (VAD inference) + ~20ms
-    (speaker callback) ≈ 41ms, comfortably under the 150ms target with
-    margin for scheduling jitter under real OS load.
-"""
+"""Barge-in controller for low-latency interruption during TTS playback."""
 
 from __future__ import annotations
 
@@ -43,21 +17,9 @@ logger = structlog.get_logger("jarvis_backend.voice.barge_in")
 
 
 class RawSpeechDetector:
-    """A hangover-free wrapper around any raw VAD engine, used
-    specifically for barge-in. Unlike `WebRtcVadProvider.is_speech()`
-    (which smooths across a hangover window to avoid fragmenting STT
-    segments), barge-in wants the fastest possible raw signal — smoothing
-    here would directly add latency to the interrupt path, trading
-    barge-in responsiveness for a benefit (segment continuity) that
-    doesn't apply when the goal is "detect speech has started," not
-    "detect an utterance has ended."
-    """
+    """Hangover-free speech detector used specifically by barge-in."""
 
     def __init__(self, raw_vad: Any) -> None:
-        # Accepts the same underlying `webrtcvad.Vad` instance a
-        # `WebRtcVadProvider` wraps, reused here without its hangover
-        # layer — see `VoiceEngine`'s composition for how both share one
-        # underlying VAD engine instance.
         self._raw_vad = raw_vad
 
     def is_speech(self, frame: AudioFrame, sample_rate: int) -> bool:
@@ -80,12 +42,7 @@ class BargeInController:
     async def monitor(
         self, frames: AsyncIterator[AudioFrame], sample_rate: int
     ) -> BargeInEvent | None:
-        """Consumes `frames` until speech is detected (returning a
-        `BargeInEvent`) or the async iterator is exhausted/cancelled
-        (returning `None` — the normal "TTS finished without
-        interruption" path, when `VoiceEngine` cancels this coroutine's
-        task once playback completes on its own).
-        """
+        """Return an interruption event when speech is detected, otherwise None."""
         async for frame in frames:
             if self._detector.is_speech(frame, sample_rate):
                 detected_at = time.monotonic()
@@ -96,31 +53,46 @@ class BargeInController:
         return None
 
 
+async def _cancel_and_wait(task: asyncio.Task[Any]) -> None:
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def race_playback_against_barge_in(
     playback_task: asyncio.Task[None],
     barge_in_task: asyncio.Task[BargeInEvent | None],
 ) -> BargeInEvent | None:
-    """Runs TTS playback and barge-in monitoring concurrently; whichever
-    finishes first determines the outcome. If playback finishes first
-    (normal completion), the barge-in task is cancelled cleanly. If
-    barge-in fires first, playback has already been halted by
-    `SpeakerManager.stop()` inside `BargeInController.monitor` — this
-    function's job is purely to stop tracking, not to stop audio (that
-    already happened at the moment of detection, not after this function
-    resolves, which is exactly what keeps barge-in latency independent of
-    asyncio task-scheduling overhead here).
+    """Race TTS playback against speech detection without orphaning either task.
+
+    A barge-in monitor can end naturally when a finite/test microphone source is
+    exhausted. ``None`` from that monitor is not a winner: playback continues.
+    An actual ``BargeInEvent`` wins a same-tick tie with playback completion.
     """
-    done, pending = await asyncio.wait(
+    done, _ = await asyncio.wait(
         {playback_task, barge_in_task}, return_when=asyncio.FIRST_COMPLETED
     )
 
-    for task in pending:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
     if barge_in_task in done:
-        return barge_in_task.result()
+        try:
+            barge_in_event = barge_in_task.result()
+        except BaseException:
+            await _cancel_and_wait(playback_task)
+            raise
+
+        if barge_in_event is not None:
+            await _cancel_and_wait(playback_task)
+            return barge_in_event
+
+        if playback_task.done():
+            return None
+
+        await playback_task
+        return None
+
+    await _cancel_and_wait(barge_in_task)
     return None

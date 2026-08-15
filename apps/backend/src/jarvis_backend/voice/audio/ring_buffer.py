@@ -1,18 +1,4 @@
-"""Audio ring buffer.
-
-Real audio I/O callbacks (via `sounddevice`/PortAudio) run on a dedicated
-OS thread outside asyncio's event loop, and that callback thread must
-never block — a blocked audio callback means dropped/glitched audio at
-the hardware level, audible to the user. `RingBuffer` is the fixed-size,
-overwrite-oldest-on-overflow buffer the callback thread writes into
-without ever waiting on a lock held by slower consumers; `MicrophoneManager`
-drains it into an asyncio-friendly stream from a separate coroutine.
-
-This is a genuine ring buffer (fixed-capacity circular array over a numpy
-buffer), not a wrapped `queue.Queue` — a `Queue` would need unbounded
-growth or blocking puts to avoid data loss, neither of which is
-acceptable on a real-time audio thread.
-"""
+"""Thread-safe fixed-capacity ring buffer for float32 mono audio."""
 
 from __future__ import annotations
 
@@ -24,17 +10,7 @@ from ..types import AudioSamples
 
 
 class RingBuffer:
-    """Fixed-capacity circular buffer for float32 mono audio samples.
-
-    Thread-safety: `write()` is called from the audio callback thread;
-    `read()` is called from an asyncio coroutine (typically via
-    `loop.run_in_executor` if reading blocks, though this implementation's
-    `read()` never blocks — it returns whatever is available, possibly
-    zero samples). A single `threading.Lock` protects the shared index
-    state; critical sections are O(1) index arithmetic plus a numpy copy,
-    kept intentionally short to minimize contention with the real-time
-    callback thread.
-    """
+    """Fixed-capacity circular buffer for audio samples."""
 
     def __init__(self, capacity_samples: int) -> None:
         if capacity_samples <= 0:
@@ -47,17 +23,13 @@ class RingBuffer:
         self._lock = threading.Lock()
 
     def write(self, samples: AudioSamples) -> None:
-        """Writes `samples` into the buffer, overwriting the oldest data
-        if the buffer is full. Never blocks, never raises for a full
-        buffer — audio callbacks cannot tolerate either."""
+        """Write samples, overwriting the oldest data on overflow."""
         n = len(samples)
         if n == 0:
             return
 
         with self._lock:
-            if n >= self._capacity:
-                # Larger than the whole buffer — keep only the most recent
-                # `capacity` samples.
+            if n > self._capacity:
                 self._buffer[:] = samples[-self._capacity :]
                 self._write_pos = 0
                 self._available = self._capacity
@@ -78,9 +50,12 @@ class RingBuffer:
             self._available = min(self._available + n, self._capacity)
 
     def read(self, max_samples: int) -> AudioSamples:
-        """Reads up to `max_samples` of the oldest available data,
-        consuming it. Returns fewer samples (or zero) if less is
-        available — callers loop/poll rather than block."""
+        """Read and consume up to `max_samples` oldest samples."""
+        if max_samples < 0:
+            raise ValueError("max_samples must be non-negative")
+        if max_samples == 0:
+            return np.zeros(0, dtype=np.float32)
+
         with self._lock:
             n = min(max_samples, self._available)
             if n == 0:
@@ -106,9 +81,6 @@ class RingBuffer:
 
     @property
     def overflow_count(self) -> int:
-        """Number of write() calls that caused data loss — a health
-        signal `AudioStreamingPipeline` can surface if the consumer side
-        is falling behind real-time capture."""
         with self._lock:
             return self._overflow_count
 

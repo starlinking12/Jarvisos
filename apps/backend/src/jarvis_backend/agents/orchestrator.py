@@ -37,6 +37,8 @@ from jarvis_contracts import (
     AgentCompletePayload,
     AgentErrorEvent,
     AgentErrorPayload,
+    AgentObserveEvent,
+    AgentObservePayload,
     AgentPlanEvent,
     AgentPlanPayload,
     AgentStepEvent,
@@ -121,7 +123,6 @@ class Orchestrator:
                     goal=text, task_id=task_id, available_agents=list(self._agents.keys())
                 )
             except Exception as error:  # noqa: BLE001 - planning failure must degrade
-                # gracefully to a direct-response plan, not crash the request.
                 logger.warning("planning_failed_falling_back", error=str(error))
                 await self._event_bus.publish(
                     AgentErrorEvent(
@@ -175,7 +176,27 @@ class Orchestrator:
                     await self._publish_step(task_id, step, TaskStatus.FAILED)
                     continue
 
-                await agent.handle_step(task_id, step)
+                observation = await agent.handle_step(task_id, step)
+                # ToolExecutor owns persistence/event publication for tool
+                # observations. Reasoning-only observations have no executor
+                # in their path, so the Orchestrator must record and publish
+                # them here; otherwise their findings disappear before
+                # response synthesis and the TaskLedger is incomplete.
+                if step.tool is None:
+                    self._task_ledger.record_observation(task_id, observation)
+                    await self._event_bus.publish(
+                        AgentObserveEvent(
+                            id=uuid.uuid4(),
+                            source=EventSource.ORCHESTRATOR,
+                            timestamp=datetime.now(UTC),
+                            payload=AgentObservePayload(
+                                task_id=task_id,
+                                step_id=observation.step_id,
+                                observation=observation.detail,
+                                success=observation.success,
+                            ),
+                        )
+                    )
                 await self._publish_step(task_id, step, TaskStatus.COMPLETED)
 
             try:
@@ -254,7 +275,6 @@ class Orchestrator:
             )
 
         chunks: list[str] = []
-        index = 0
         async for delta in self._model_router.stream(
             AiTaskType.CHAT, messages, task_id=task_id
         ):
@@ -272,7 +292,6 @@ class Orchestrator:
                     ),
                 )
             )
-            index += 1
 
         await self._event_bus.publish(
             OrchestratorMessageEvent(

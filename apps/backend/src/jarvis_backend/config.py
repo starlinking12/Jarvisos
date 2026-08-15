@@ -26,13 +26,10 @@ from jarvis_contracts import AiTaskType
 
 
 class ProviderConfig(BaseModel):
-    """Configuration for one instantiated model provider. `kind` selects
-    which provider class `main.py`'s composition root constructs; `name`
-    is the routing-table-facing identifier (so two configs of the same
-    `kind` — e.g. two Ollama hosts — can coexist under different names)."""
+    """Configuration for one instantiated model provider."""
 
     name: str
-    kind: str  # "ollama" | "mock" — extend as new provider kinds are added
+    kind: str
     host: str | None = None
     request_timeout_s: float = 120.0
 
@@ -43,10 +40,6 @@ class RoutingTarget(BaseModel):
 
 
 class RoutingRule(BaseModel):
-    """Ordered fallback chain for one task type. `ModelRouter` tries
-    `targets[0]` first; on failure (provider unhealthy, request error,
-    capability mismatch) it tries `targets[1]`, and so on."""
-
     task_type: AiTaskType
     targets: list[RoutingTarget]
 
@@ -80,6 +73,13 @@ class ResourceLimits(BaseModel):
     max_concurrent_agent_tasks: int = 8
 
 
+class PluginConfig(BaseModel):
+    """Explicit allowlist for trusted local plugin code."""
+
+    directories: tuple[str, ...] = ()
+    allowed_ids: frozenset[str] = frozenset()
+
+
 def _default_providers() -> list[ProviderConfig]:
     return [
         ProviderConfig(name="ollama-local", kind="ollama", host="http://127.0.0.1:11434"),
@@ -87,10 +87,6 @@ def _default_providers() -> list[ProviderConfig]:
 
 
 def _default_routing() -> RoutingConfig:
-    # Mirrors the project mandate's model choices (Qwen, DeepSeek) with a
-    # same-provider fallback for each task type — cross-provider fallback
-    # requires a second provider to actually be configured, which is a
-    # deployment-time decision, not a hardcoded default.
     return RoutingConfig(
         rules=[
             RoutingRule(
@@ -107,24 +103,9 @@ def _default_routing() -> RoutingConfig:
                     RoutingTarget(provider="ollama-local", model="qwen2.5"),
                 ],
             ),
-            RoutingRule(
-                task_type=AiTaskType.TOOLCALL,
-                targets=[
-                    RoutingTarget(provider="ollama-local", model="qwen2.5"),
-                ],
-            ),
-            RoutingRule(
-                task_type=AiTaskType.SUMMARIZE,
-                targets=[
-                    RoutingTarget(provider="ollama-local", model="qwen2.5"),
-                ],
-            ),
-            RoutingRule(
-                task_type=AiTaskType.EMBED,
-                targets=[
-                    RoutingTarget(provider="ollama-local", model="qwen2.5"),
-                ],
-            ),
+            RoutingRule(task_type=AiTaskType.TOOLCALL, targets=[RoutingTarget(provider="ollama-local", model="qwen2.5")]),
+            RoutingRule(task_type=AiTaskType.SUMMARIZE, targets=[RoutingTarget(provider="ollama-local", model="qwen2.5")]),
+            RoutingRule(task_type=AiTaskType.EMBED, targets=[RoutingTarget(provider="ollama-local", model="qwen2.5")]),
         ]
     )
 
@@ -135,26 +116,22 @@ class Settings(BaseSettings):
     backend_port: int = Field(default=8137)
     log_level: str = Field(default="INFO")
     environment: str = Field(default="development")
-
-    # Ollama / local model routing — legacy single-host convenience fields,
-    # retained for backward compatibility with Phase 0/1 config and used as
-    # the default provider host when `providers_json` is not set.
     ollama_host: str = Field(default="http://127.0.0.1:11434")
     default_model: str = Field(default="qwen2.5")
 
-    # Phase 2: structured provider/routing/retry/resource config, each as a
-    # raw JSON string env var (see module docstring for rationale).
     providers_json: str | None = Field(default=None, alias="JARVIS_PROVIDERS_JSON")
     routing_json: str | None = Field(default=None, alias="JARVIS_ROUTING_JSON")
     retry_policy_json: str | None = Field(default=None, alias="JARVIS_RETRY_POLICY_JSON")
     resource_limits_json: str | None = Field(default=None, alias="JARVIS_RESOURCE_LIMITS_JSON")
-    # Phase 3: Voice Engine configuration — see voice/config.py's VoiceSettings.
     voice_settings_json: str | None = Field(default=None, alias="JARVIS_VOICE_SETTINGS_JSON")
-    # Phase 4: persistence + Security Center configuration.
     security_settings_json: str | None = Field(
         default=None, alias="JARVIS_SECURITY_SETTINGS_JSON"
     )
     db_path: str | None = Field(default=None, alias="JARVIS_DB_PATH")
+    automation_enabled: bool = Field(default=False, alias="JARVIS_AUTOMATION_ENABLED")
+    # Phase 5: plugins are disabled unless both a directory and explicit
+    # allowlist are configured. Discovery itself never imports plugin code.
+    plugins_json: str | None = Field(default=None, alias="JARVIS_PLUGINS_JSON")
 
     def providers(self) -> list[ProviderConfig]:
         if not self.providers_json:
@@ -176,6 +153,11 @@ class Settings(BaseSettings):
         if not self.resource_limits_json:
             return ResourceLimits()
         return ResourceLimits.model_validate_json(self.resource_limits_json)
+
+    def plugin_config(self) -> PluginConfig:
+        if not self.plugins_json:
+            return PluginConfig()
+        return PluginConfig.model_validate_json(self.plugins_json)
 
 
 @lru_cache

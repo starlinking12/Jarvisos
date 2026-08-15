@@ -44,10 +44,12 @@ async def test_domain_agent_delegates_allowed_tool_to_executor() -> None:
 
     registry = ToolRegistry()
     registry.register(ToolSpec(name="allowed.tool", description="allowed", handler=handler))
+    task_ledger = TaskLedger()
+    task = task_ledger.create_task(goal="delegate tool", requested_by=EventSource.ORCHESTRATOR)
     executor = ToolExecutor(
         registry=registry,
         safety_gate=SafetyGate(SafetyPolicy.production_default()),
-        task_ledger=TaskLedger(),
+        task_ledger=task_ledger,
         event_bus=EventBus(),
     )
     router = ModelRouter(
@@ -71,7 +73,7 @@ async def test_domain_agent_delegates_allowed_tool_to_executor() -> None:
         tool="allowed.tool",
     )
 
-    observation = await agent.handle_step(uuid.uuid4(), step)
+    observation = await agent.handle_step(task.task_id, step)
 
     assert observation.success is True
     assert observation.detail == "tool ran"
@@ -79,10 +81,12 @@ async def test_domain_agent_delegates_allowed_tool_to_executor() -> None:
 
 async def test_domain_agent_rejects_disallowed_tool() -> None:
     registry = ToolRegistry()
+    task_ledger = TaskLedger()
+    task = task_ledger.create_task(goal="reject tool", requested_by=EventSource.ORCHESTRATOR)
     executor = ToolExecutor(
         registry=registry,
         safety_gate=SafetyGate(SafetyPolicy.production_default()),
-        task_ledger=TaskLedger(),
+        task_ledger=task_ledger,
         event_bus=EventBus(),
     )
     router = ModelRouter(
@@ -106,7 +110,7 @@ async def test_domain_agent_rejects_disallowed_tool() -> None:
         tool="system.get_current_time",
     )
 
-    observation = await agent.handle_step(uuid.uuid4(), step)
+    observation = await agent.handle_step(task.task_id, step)
 
     assert observation.success is False
     assert "not permitted" in observation.detail
