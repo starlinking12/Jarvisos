@@ -37,7 +37,15 @@ jobs:
           cache: pip
           cache-dependency-path: apps/backend/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - name: Install backend with diagnostics
+        run: python -m pip install -e ".[dev]" -v 2>&1 | tee install.log
+      - name: Upload install diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-install-diagnostics-collect
+          path: apps/backend/install.log
+          if-no-files-found: ignore
       - run: python -m pytest --collect-only -q
 
   voice-integration:
@@ -55,7 +63,15 @@ jobs:
           cache: pip
           cache-dependency-path: apps/backend/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - name: Install backend with diagnostics
+        run: python -m pip install -e ".[dev]" -v 2>&1 | tee install.log
+      - name: Upload install diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-install-diagnostics-voice
+          path: apps/backend/install.log
+          if-no-files-found: ignore
       - name: Diagnose voice test setup/hang
         run: >-
           python -m pytest
@@ -79,7 +95,15 @@ jobs:
           cache: pip
           cache-dependency-path: apps/backend/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - name: Install backend with diagnostics
+        run: python -m pip install -e ".[dev]" -v 2>&1 | tee install.log
+      - name: Upload install diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-install-diagnostics-suite
+          path: apps/backend/install.log
+          if-no-files-found: ignore
       - name: Run full backend suite with diagnostics
         run: >-
           python -m pytest
