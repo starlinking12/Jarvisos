@@ -67,28 +67,32 @@ async def race_playback_against_barge_in(
     playback_task: asyncio.Task[None],
     barge_in_task: asyncio.Task[BargeInEvent | None],
 ) -> BargeInEvent | None:
-    """Race TTS playback against speech detection without cancelling the wrong task.
+    """Race TTS playback against speech detection without orphaning either task.
 
     A barge-in monitor can end naturally when a finite/test microphone source is
-    exhausted. ``None`` from that monitor is not a winner: playback must continue.
-    Only an actual ``BargeInEvent`` cancels playback. Conversely, normal playback
-    completion cancels the still-running monitor.
+    exhausted. ``None`` from that monitor is not a winner: playback continues.
+    An actual ``BargeInEvent`` wins a same-tick tie with playback completion.
     """
     done, _ = await asyncio.wait(
         {playback_task, barge_in_task}, return_when=asyncio.FIRST_COMPLETED
     )
 
-    if playback_task in done:
-        await _cancel_and_wait(barge_in_task)
-        return None
+    if barge_in_task in done:
+        try:
+            barge_in_event = barge_in_task.result()
+        except BaseException:
+            await _cancel_and_wait(playback_task)
+            raise
 
-    barge_in_event = barge_in_task.result()
-    if barge_in_event is None:
-        # Monitoring ended without speech; it must not terminate/cancel TTS.
+        if barge_in_event is not None:
+            await _cancel_and_wait(playback_task)
+            return barge_in_event
+
+        if playback_task.done():
+            return None
+
         await playback_task
         return None
 
-    # The monitor has already stopped the speaker at detection time. Cancel the
-    # producer task so an in-flight TTS subprocess/generator receives cleanup.
-    await _cancel_and_wait(playback_task)
-    return barge_in_event
+    await _cancel_and_wait(barge_in_task)
+    return None
